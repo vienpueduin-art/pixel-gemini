@@ -2,6 +2,8 @@
 import hmac
 import logging
 import os
+import secrets
+import time
 from threading import Lock
 
 import requests
@@ -14,7 +16,16 @@ from device_simulator import create_test_profile
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 log = logging.getLogger("pixel-gemini")
 app = Flask(__name__)
-app.secret_key = os.environ.get("FLASK_SECRET_KEY", "")
+FLASK_SECRET_KEY = os.environ.get("FLASK_SECRET_KEY", "")
+# Keep the portal usable (and sessions working) even when deployment env is
+# incomplete. A random fallback is process-local, so OAuth readiness still
+# depends on the explicit FLASK_SECRET_KEY below.
+app.secret_key = FLASK_SECRET_KEY or secrets.token_hex(32)
+if not FLASK_SECRET_KEY:
+    log.warning(
+        "FLASK_SECRET_KEY is not set; using an ephemeral secret. "
+        "Sessions and signed OAuth state will not survive a restart."
+    )
 app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SECURE=True,
                   SESSION_COOKIE_SAMESITE="Lax", PERMANENT_SESSION_LIFETIME=3600)
 
@@ -28,12 +39,13 @@ SCOPES = ["openid", "https://www.googleapis.com/auth/userinfo.email",
 _accounts = {}
 _devices = {}
 _accounts_lock = Lock()
-_serializer = URLSafeTimedSerializer(app.secret_key, salt="telegram-google-link-v1") if app.secret_key else None
+_serializer = URLSafeTimedSerializer(FLASK_SECRET_KEY, salt="telegram-google-link-v1") if FLASK_SECRET_KEY else None
 OFFER_URL = "https://one.google.com/"
+LOGIN_STATE_MAX_AGE = 600
 
 
 def oauth_ready():
-    return bool(app.secret_key and CLIENT_ID and CLIENT_SECRET and REDIRECT_URI)
+    return bool(FLASK_SECRET_KEY and CLIENT_ID and CLIENT_SECRET and REDIRECT_URI)
 
 
 def make_flow(state=None):
@@ -137,11 +149,14 @@ def index():
 
 @app.get("/login")
 def login():
+    if not oauth_ready():
+        return render_template("index.html", account=None, ready=False), 503
     try:
         flow = make_flow()
         url, state = flow.authorization_url(access_type="online",
             include_granted_scopes="true", prompt="select_account")
         session["oauth_state"] = state
+        session["oauth_state_issued_at"] = time.time()
         session.permanent = True
         return redirect(url)
     except Exception:
@@ -182,9 +197,22 @@ def oauth2callback():
             return "Không thể hoàn tất đăng nhập. Hãy quay lại Telegram và thử lại.", 400
 
     expected_state = session.pop("oauth_state", None)
-    if not expected_state or not received_state or received_state != expected_state:
-        flash("Phiên đăng nhập không hợp lệ hoặc đã hết hạn. Vui lòng thử lại.", "error")
-        return redirect(url_for("index"))
+    issued_at = session.pop("oauth_state_issued_at", None)
+    state_is_fresh = (
+        isinstance(issued_at, (int, float))
+        and time.time() - issued_at <= LOGIN_STATE_MAX_AGE
+    )
+    try:
+        state_matches = bool(
+            expected_state and received_state
+            and hmac.compare_digest(
+                received_state.encode("utf-8"), expected_state.encode("utf-8")
+            )
+        )
+    except (AttributeError, TypeError):
+        state_matches = False
+    if not state_is_fresh or not state_matches:
+        return "Phiên đăng nhập không hợp lệ hoặc đã hết hạn. Vui lòng thử lại.", 400
     if request.args.get("error"):
         flash("Bạn đã hủy hoặc Google không hoàn tất đăng nhập.", "error")
         return redirect(url_for("index"))
@@ -196,7 +224,8 @@ def oauth2callback():
         info.raise_for_status()
         profile = info.json()
         if not profile.get("email") or not profile.get("email_verified", False):
-            raise RuntimeError("Email chưa được Google xác minh.")
+            log.warning("Website Google account email is not verified")
+            return "Email chưa được Google xác minh.", 400
         session.clear()
         session["account"] = {"email": profile["email"], "name": profile.get("name", ""),
                               "picture": profile.get("picture", "")}
