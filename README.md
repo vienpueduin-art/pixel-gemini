@@ -4,7 +4,7 @@ A single Flask web service hosts the website, Google OAuth callback, and Telegra
 
 ## Render deployment
 
-1. Create a Render Web Service from this repository and choose branch `restore-safe-device-test-features` (after merging the PR).
+1. Create a Render Web Service from this repository on branch `main`.
 2. Use the included `render.yaml` Blueprint settings, or set:
    - Build: `pip install -r requirements.txt`
    - Start: `gunicorn app:app --workers 1 --threads 4 --timeout 120`
@@ -12,6 +12,29 @@ A single Flask web service hosts the website, Google OAuth callback, and Telegra
 4. In Google Cloud Console, add the exact `GOOGLE_REDIRECT_URI` as an Authorized redirect URI.
 5. Set Telegram's webhook to `https://YOUR-SERVICE.onrender.com/telegram/webhook` with the configured secret token.
 6. Test the website and Telegram commands below.
+
+### Local run
+
+```bash
+pip install -r requirements.txt
+python app.py
+```
+
+Set `PORT` if the default `10000` is busy. For a local OAuth callback, Google
+still expects the exact `GOOGLE_REDIRECT_URI` registered in the OAuth client;
+use an HTTPS tunnel or a `http://localhost` callback registered for testing.
+
+### Tests
+
+The test suite uses only the standard library:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+It covers the account portal, missing OAuth configuration, website and
+Telegram callbacks, forged/expired OAuth state, unverified emails, webhook
+authentication, and every bot command.
 
 ## Telegram commands
 
@@ -41,3 +64,4 @@ The bot does not automate Google One sign-in, inspect private Google pages, alte
 - The bot never asks for Google passwords or one-time codes.
 - Telegram OAuth state is signed and expires after 10 minutes; webhook requests are checked using Telegram's secret-token header.
 - Only the verified email is retained in process memory.
+- If OAuth environment variables are missing, `/health` stays available and `/login` returns `503` with a configuration hint instead of crashing.
