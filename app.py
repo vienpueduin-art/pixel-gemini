@@ -2,6 +2,7 @@
 import hmac
 import logging
 import os
+import secrets
 from threading import Lock
 
 import requests
@@ -14,7 +15,11 @@ from device_simulator import create_test_profile
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 log = logging.getLogger("pixel-gemini")
 app = Flask(__name__)
-app.secret_key = os.environ.get("FLASK_SECRET_KEY", "")
+FLASK_SECRET_KEY = os.environ.get("FLASK_SECRET_KEY", "")
+# Keep the portal usable (and sessions working) even when deployment env is
+# incomplete. A random fallback is process-local, so OAuth readiness still
+# depends on the explicit FLASK_SECRET_KEY below.
+app.secret_key = FLASK_SECRET_KEY or secrets.token_hex(32)
 app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SECURE=True,
                   SESSION_COOKIE_SAMESITE="Lax", PERMANENT_SESSION_LIFETIME=3600)
 
@@ -28,12 +33,12 @@ SCOPES = ["openid", "https://www.googleapis.com/auth/userinfo.email",
 _accounts = {}
 _devices = {}
 _accounts_lock = Lock()
-_serializer = URLSafeTimedSerializer(app.secret_key, salt="telegram-google-link-v1") if app.secret_key else None
+_serializer = URLSafeTimedSerializer(FLASK_SECRET_KEY, salt="telegram-google-link-v1") if FLASK_SECRET_KEY else None
 OFFER_URL = "https://one.google.com/"
 
 
 def oauth_ready():
-    return bool(app.secret_key and CLIENT_ID and CLIENT_SECRET and REDIRECT_URI)
+    return bool(FLASK_SECRET_KEY and CLIENT_ID and CLIENT_SECRET and REDIRECT_URI)
 
 
 def make_flow(state=None):
@@ -137,6 +142,8 @@ def index():
 
 @app.get("/login")
 def login():
+    if not oauth_ready():
+        return render_template("index.html", account=None, ready=False), 503
     try:
         flow = make_flow()
         url, state = flow.authorization_url(access_type="online",
@@ -182,9 +189,9 @@ def oauth2callback():
             return "Không thể hoàn tất đăng nhập. Hãy quay lại Telegram và thử lại.", 400
 
     expected_state = session.pop("oauth_state", None)
-    if not expected_state or not received_state or received_state != expected_state:
-        flash("Phiên đăng nhập không hợp lệ hoặc đã hết hạn. Vui lòng thử lại.", "error")
-        return redirect(url_for("index"))
+    if (not expected_state or not received_state
+            or not hmac.compare_digest(received_state, expected_state)):
+        return "Phiên đăng nhập không hợp lệ hoặc đã hết hạn. Vui lòng thử lại.", 400
     if request.args.get("error"):
         flash("Bạn đã hủy hoặc Google không hoàn tất đăng nhập.", "error")
         return redirect(url_for("index"))
