@@ -9,6 +9,8 @@ from flask import Flask, flash, jsonify, redirect, render_template, request, ses
 from google_auth_oauthlib.flow import Flow
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 
+from device_simulator import create_test_profile
+
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 log = logging.getLogger("pixel-gemini")
 app = Flask(__name__)
@@ -24,8 +26,10 @@ WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")
 SCOPES = ["openid", "https://www.googleapis.com/auth/userinfo.email",
           "https://www.googleapis.com/auth/userinfo.profile"]
 _accounts = {}
+_devices = {}
 _accounts_lock = Lock()
 _serializer = URLSafeTimedSerializer(app.secret_key, salt="telegram-google-link-v1") if app.secret_key else None
+OFFER_URL = "https://one.google.com/"
 
 
 def oauth_ready():
@@ -63,6 +67,12 @@ def bot_login_url(chat_id):
     return url
 
 
+def _device_summary(profile):
+    return (f"Model: {profile['model']}\nAndroid: {profile['android_version']}\n"
+            f"IMEI (synthetic): {profile['imei']}\nAndroid ID (synthetic): {profile['android_id']}\n"
+            f"Session: {profile['session_id']}\nEnvironment: {profile['environment']}")
+
+
 def handle_telegram_update(update):
     message = update.get("message") or update.get("edited_message")
     if not message or not message.get("text"):
@@ -73,7 +83,7 @@ def handle_telegram_update(update):
         return
     command = message["text"].strip().split()[0].split("@")[0].lower()
     if command == "/start":
-        telegram_send(chat_id, "Pixel Gemini bot\n\n/login - Kết nối Google qua trang chính thức\n/status - Xem trạng thái trong phiên hiện tại\n/logout - Ngắt liên kết\n/check_offer - Hướng dẫn kiểm tra ưu đãi\n\nKhông gửi mật khẩu hoặc mã xác minh Google cho bot.")
+        telegram_send(chat_id, "Pixel Gemini bot\n\n/login - Kết nối Google qua OAuth chính thức\n/device - Tạo hồ sơ Pixel mô phỏng để kiểm thử cục bộ\n/status - Xem trạng thái tài khoản và hồ sơ test\n/logout - Ngắt liên kết Google\n/check_offer - Mở hướng dẫn kiểm tra ưu đãi chính thức\n/get_link - Lấy liên kết Google One\n\nIMEI/Android ID trong bot là dữ liệu TEST giả lập, không phải định danh thiết bị thật và không được gửi tới Google. Bot không nhận mật khẩu hoặc OTP.")
     elif command == "/login":
         if chat.get("type") != "private":
             telegram_send(chat_id, "Vui lòng mở chat riêng với bot rồi dùng /login.")
@@ -83,22 +93,41 @@ def handle_telegram_update(update):
             except Exception:
                 log.exception("Could not create OAuth URL")
                 telegram_send(chat_id, "Chưa thể tạo liên kết đăng nhập. Vui lòng thử lại sau.")
+    elif command == "/device":
+        profile = create_test_profile()
+        with _accounts_lock:
+            _devices[chat_id] = profile.to_dict()
+        telegram_send(chat_id, "Đã tạo hồ sơ Pixel mô phỏng cho môi trường test:\n\n" +
+                      _device_summary(profile.to_dict()) +
+                      "\n\nLưu ý: ID tổng hợp chỉ dành cho mock/local testing, không dùng để giả danh thiết bị khi gọi Google.")
     elif command == "/status":
         with _accounts_lock:
             account = _accounts.get(chat_id)
-        telegram_send(chat_id, ("Đã kết nối Google: " + account["email"] + "\nChỉ lấy email và hồ sơ cơ bản.")
-            if account else "Chưa có tài khoản Google được kết nối trong phiên chạy hiện tại. Dùng /login.")
+            device = _devices.get(chat_id)
+        lines = []
+        lines.append("Google: " + (account["email"] if account else "chưa kết nối"))
+        lines.append("Device profile: " + ("đã tạo" if device else "chưa tạo — dùng /device"))
+        if device:
+            lines.append("Model: " + device["model"])
+            lines.append("Session: " + device["session_id"])
+        telegram_send(chat_id, "\n".join(lines) + "\nTrạng thái được lưu trong RAM của tiến trình và có thể mất khi Render khởi động lại.")
     elif command == "/logout":
         with _accounts_lock:
             _accounts.pop(chat_id, None)
-        telegram_send(chat_id, "Đã ngắt liên kết Google khỏi phiên bot hiện tại.")
+        telegram_send(chat_id, "Đã ngắt liên kết Google khỏi phiên bot hiện tại. Hồ sơ test không bị ảnh hưởng.")
     elif command == "/check_offer":
         with _accounts_lock:
             account = _accounts.get(chat_id)
+            device = _devices.get(chat_id)
         if not account:
-            telegram_send(chat_id, "Bạn hãy dùng /login trước.")
+            telegram_send(chat_id, "Bạn hãy dùng /login để liên kết tài khoản qua Google OAuth trước.")
         else:
-            telegram_send(chat_id, "Tài khoản đã kết nối: " + account["email"] + "\nGoogle không cung cấp API cơ bản để xác nhận ưu đãi Gemini/Google One. Hãy tự kiểm tra tại https://one.google.com/. Bot không quét trang riêng tư hay tự động đăng nhập.")
+            device_note = ("\nHồ sơ test hiện tại: " + device["model"] + " / " + device["session_id"]
+                           if device else "\nChưa có hồ sơ test; dùng /device nếu cần kiểm thử mock.")
+            telegram_send(chat_id, "Tài khoản đã kết nối: " + account["email"] + device_note +
+                          "\n\nBot không thể xác minh eligibility qua API hồ sơ cơ bản và không tự động đăng nhập/quét trang riêng tư. Hãy mở Google One để tự kiểm tra ưu đãi: " + OFFER_URL)
+    elif command == "/get_link":
+        telegram_send(chat_id, "Liên kết Google One chính thức để tự kiểm tra ưu đãi: " + OFFER_URL)
 
 
 @app.get("/")
