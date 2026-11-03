@@ -1,62 +1,43 @@
-# Pixel Gemini — Telegram bot + Google OAuth
+# Pixel Gemini — Telegram bot + Google OAuth + isolated device test profiles
 
 A single Flask web service hosts the website, Google OAuth callback, and Telegram webhook. It is designed to minimize Render services: one **Free Web Service**, no Background Worker and no database.
 
 ## Render deployment
 
-1. Create a Render Web Service from this repository and choose branch `render-free-telegram-webhook`.
+1. Create a Render Web Service from this repository and choose branch `restore-safe-device-test-features` (after merging the PR).
 2. Use the included `render.yaml` Blueprint settings, or set:
    - Build: `pip install -r requirements.txt`
    - Start: `gunicorn app:app --workers 1 --threads 4 --timeout 120`
-3. In Render → Environment, set:
-   - `GOOGLE_CLIENT_ID`: Google OAuth Web client ID
-   - `GOOGLE_CLIENT_SECRET`: Google OAuth client secret
-   - `GOOGLE_REDIRECT_URI`: `https://YOUR-SERVICE.onrender.com/oauth2callback`
-   - `TELEGRAM_BOT_TOKEN`: token from BotFather
-   - `FLASK_SECRET_KEY`: long random secret (Render can generate it)
-   - `TELEGRAM_WEBHOOK_SECRET`: random secret containing only letters, digits, underscores or hyphens
-4. In Google Cloud Console → Google Auth Platform → Clients, add the exact `GOOGLE_REDIRECT_URI` above as an Authorized redirect URI. It must match exactly.
-5. After deployment, set the Telegram webhook. Replace the placeholders and run this command in a terminal (do not post the bot token or webhook secret in chat):
+3. In Render → Environment, set `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URI`, `TELEGRAM_BOT_TOKEN`, `FLASK_SECRET_KEY`, and `TELEGRAM_WEBHOOK_SECRET`.
+4. In Google Cloud Console, add the exact `GOOGLE_REDIRECT_URI` as an Authorized redirect URI.
+5. Set Telegram's webhook to `https://YOUR-SERVICE.onrender.com/telegram/webhook` with the configured secret token.
+6. Test the website and Telegram commands below.
 
-   ```bash
-   curl -X POST "https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/setWebhook" \
-     -d "url=https://YOUR-SERVICE.onrender.com/telegram/webhook" \
-     -d "secret_token=<TELEGRAM_WEBHOOK_SECRET>"
-   ```
+## Telegram commands
 
-6. Open the website and test Google login. Then open the bot in a private Telegram chat and send `/start`, `/login`, `/status`, and `/check_offer`.
+- `/start` — show command help
+- `/login` — connect Google through the official OAuth consent flow
+- `/device` — create a synthetic Pixel 10 Pro / Android 16 test profile
+- `/status` — show linked email and current synthetic test-profile status
+- `/check_offer` — explain the limitation and point to Google's official Google One page
+- `/get_link` — return the official Google One URL
+- `/logout` — clear the in-memory Google account link
 
-## Commands
+## Synthetic device profiles
 
-- `/start` — show help
-- `/login` — create a short-lived signed OAuth state and send the official Google authorization URL
-- `/status` — show whether an account is linked in the current process
-- `/logout` — clear the in-memory link
-- `/check_offer` — explain how to check offers on Google's official site
+`device_simulator.py` creates a test-only profile containing a simulated model, Android version, synthetic IMEI-like label, synthetic Android-ID-like label, session UUID, and test user-agent string. Values are explicitly prefixed/labeled as test data and are intended only for local mock services, unit tests, and defensive fingerprint-detection experiments in systems you control. They are not valid device identifiers and must not be sent to Google or used to impersonate a real device.
+
+The bot does not automate Google One sign-in, inspect private Google pages, alter real browser/device fingerprints for requests to Google, or determine promotion eligibility. Use the official Google One page to check offers manually: https://one.google.com/.
 
 ## Free-tier limitations
 
 - Render Free Web Services can spin down when idle; the first webhook or page request after inactivity may be delayed.
-- This configuration intentionally uses one Gunicorn worker because account-link status is held in process memory. Deploy/restart or sleep/wake can clear that status. The OAuth success notification is sent to Telegram when the callback completes, but `/status` is not durable across restarts.
-- This design has no database and does not persist Google access or refresh tokens.
-- For durable account-link status or consistently fast bot responses, use a persistent database and an always-on worker/service plan.
+- This configuration uses one Gunicorn worker because account and test-profile state is held in process memory. Restarts or sleep/wake can clear it.
+- No database is used, and Google access/refresh tokens are not persisted.
 
-## Security and scope
+## Security
 
-- Google login uses the official OAuth 2.0 / OpenID Connect flow and requests only `openid`, `email`, and `profile`.
+- Google login uses official OAuth 2.0 / OpenID Connect with only `openid`, `email`, and `profile` scopes.
 - The bot never asks for Google passwords or one-time codes.
-- OAuth state for Telegram linking is signed and expires after 10 minutes. Telegram webhook requests are checked using Telegram's secret-token header.
-- The app stores only the verified email in process memory. Google OAuth tokens are not persisted.
-- This app cannot verify personal Google One / Gemini promotion eligibility or retrieve private redemption links through the basic profile API. Check current offers directly at https://one.google.com/.
-- No password-based browser automation, CAPTCHA bypass, device spoofing, or private-page scraping is included.
-
-## Local development
-
-Set the environment variables above, then:
-
-```bash
-pip install -r requirements.txt
-python app.py
-```
-
-For local webhook testing, use a public HTTPS tunnel and configure Telegram's webhook URL accordingly.
+- Telegram OAuth state is signed and expires after 10 minutes; webhook requests are checked using Telegram's secret-token header.
+- Only the verified email is retained in process memory.
