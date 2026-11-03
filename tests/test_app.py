@@ -3,16 +3,17 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-os.environ.setdefault("FLASK_SECRET_KEY", "test-secret")
-os.environ.setdefault("GOOGLE_CLIENT_ID", "test-client")
-os.environ.setdefault("GOOGLE_CLIENT_SECRET", "test-client-secret")
-os.environ.setdefault("GOOGLE_REDIRECT_URI", "http://localhost/oauth2callback")
-os.environ.setdefault("TELEGRAM_BOT_TOKEN", "test-token")
-os.environ.setdefault("TELEGRAM_WEBHOOK_SECRET", "test-webhook")
+os.environ["FLASK_SECRET_KEY"] = "test-secret"
+os.environ["GOOGLE_CLIENT_ID"] = "test-client"
+os.environ["GOOGLE_CLIENT_SECRET"] = "test-client-secret"
+os.environ["GOOGLE_REDIRECT_URI"] = "http://localhost/oauth2callback"
+os.environ["TELEGRAM_BOT_TOKEN"] = "test-token"
+os.environ["TELEGRAM_WEBHOOK_SECRET"] = "test-webhook"
 
 from itsdangerous import SignatureExpired
 
 import app as app_module
+import time
 from device_simulator import create_test_profile
 
 WEBHOOK_HEADERS = {"X-Telegram-Bot-Api-Secret-Token": "test-webhook"}
@@ -135,6 +136,7 @@ class AppTestCase(unittest.TestCase):
     def test_website_callback_links_account(self):
         with self.client.session_transaction() as sess:
             sess["oauth_state"] = "web-state"
+            sess["oauth_state_issued_at"] = time.time()
         with patch.object(app_module, "make_flow", return_value=FakeFlow()), \
                 patch.object(app_module.requests, "get",
                              return_value=fake_userinfo()):
@@ -158,6 +160,42 @@ class AppTestCase(unittest.TestCase):
                 "/oauth2callback?state=old&code=abc"
             )
         self.assertEqual(response.status_code, 400)
+
+    def test_non_ascii_forged_state_returns_400(self):
+        with self.client.session_transaction() as sess:
+            sess["oauth_state"] = "expected-state"
+        response = self.client.get(
+            "/oauth2callback?state=%C3%A9&code=abc"
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_expired_website_state_returns_400(self):
+        response = self.client.get("/login")
+        self.assertEqual(response.status_code, 302)
+        with self.client.session_transaction() as sess:
+            state = sess["oauth_state"]
+            sess["oauth_state_issued_at"] = time.time() - 601
+        with patch.object(app_module, "make_flow", return_value=FakeFlow()), \
+                patch.object(app_module.requests, "get",
+                             return_value=fake_userinfo()):
+            response = self.client.get(
+                f"/oauth2callback?state={state}&code=abc"
+            )
+        self.assertEqual(response.status_code, 400)
+
+    def test_website_unverified_email_is_rejected(self):
+        with self.client.session_transaction() as sess:
+            sess["oauth_state"] = "web-state"
+            sess["oauth_state_issued_at"] = time.time()
+        with patch.object(app_module, "make_flow", return_value=FakeFlow()), \
+                patch.object(app_module.requests, "get",
+                             return_value=fake_userinfo(verified=False)):
+            response = self.client.get(
+                "/oauth2callback?state=web-state&code=abc"
+            )
+        self.assertEqual(response.status_code, 400)
+        with self.client.session_transaction() as sess:
+            self.assertNotIn("account", sess)
 
     def test_unverified_email_is_rejected(self):
         state = app_module._serializer.dumps({"chat_id": 99})
@@ -196,6 +234,10 @@ class AppTestCase(unittest.TestCase):
             403,
         )
 
+    def test_webhook_rejects_unconfigured_secret(self):
+        app_module.WEBHOOK_SECRET = ""
+        self.assertEqual(self.post("/start", headers={}).status_code, 403)
+
     def test_start_sends_help(self):
         with patch.object(app_module, "telegram_send") as send:
             self.assertEqual(self.post("/start").status_code, 200)
@@ -225,6 +267,13 @@ class AppTestCase(unittest.TestCase):
         message = send.call_args.args[1]
         self.assertIn("user@example.com", message)
         self.assertIn("Pixel 10 Pro", message)
+
+    def test_status_after_restart_reports_not_connected(self):
+        with patch.object(app_module, "telegram_send") as send:
+            self.assertEqual(self.post("/status").status_code, 200)
+        message = send.call_args.args[1]
+        self.assertIn("chưa kết nối", message)
+        self.assertIn("chưa tạo", message)
 
     def test_check_offer_requires_login(self):
         with patch.object(app_module, "telegram_send") as send:

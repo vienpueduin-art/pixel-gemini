@@ -26,7 +26,7 @@ use an HTTPS tunnel or a `http://localhost` callback registered for testing.
 
 ### Tests
 
-The test suite uses only the standard library:
+The suite uses stdlib `unittest` and requires no extra test dependencies.
 
 ```bash
 python -m unittest discover -s tests -v
